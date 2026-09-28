@@ -1,0 +1,16 @@
+metric,value
+Prod tables,1362
+SysTest tables,1493
+Prod tables present in SysTest,1342
+Prod tables MISSING in SysTest,20
+New SysTest-only tables (ignored),151
+Common tables with any column change,804
+Common tables with columns added,144
+Common tables with columns dropped,13
+Columns added (to existing Prod tables),455
+Columns dropped (from existing Prod tables),22
+Columns with data type change,1452
+Columns with length change,978
+  of which length decreased,0
+Columns with precision/scale change,1318
+Columns with nullability change,11
