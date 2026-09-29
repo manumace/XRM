@@ -9,15 +9,21 @@ New SysTest-only tables are ignored.
 Output: one workbook, MAS_Prod_vs_SysTest_Compare.xlsx (Stats, TableSummary,
 ColumnChanges, TypeTransitions, ProdTablesMissing tabs).
 
-Usage: python compare_schema.py <MAS_Upgrade.xlsx> [out_dir]
+Usage: python compare_schema.py <MAS_Upgrade.xlsx> [out_dir] [--tables list.txt]
+  --tables  restrict the comparison to the table names in list.txt (one per line);
+            output is then MAS_Prod_vs_SysTest_Compare_<list name>.xlsx
 """
-import sys
+import argparse
 from pathlib import Path
 
 import pandas as pd
 
-src = sys.argv[1]
-out = Path(sys.argv[2] if len(sys.argv) > 2 else ".")
+ap = argparse.ArgumentParser()
+ap.add_argument("src")
+ap.add_argument("out_dir", nargs="?", default=".")
+ap.add_argument("--tables")
+args = ap.parse_args()
+src, out = args.src, Path(args.out_dir)
 out.mkdir(parents=True, exist_ok=True)
 
 KEY = ["schema_name", "table_name", "column_name"]
@@ -34,6 +40,11 @@ def load(sheet):
 
 
 prod, sys_ = load("Prod"), load("SysTest")
+wanted = None
+if args.tables:
+    wanted = sorted({l.strip().lower() for l in open(args.tables) if l.strip()})
+    prod = prod[prod.table_name.isin(wanted)]
+    sys_ = sys_[sys_.table_name.isin(wanted)]
 tbl = ["schema_name", "table_name"]
 prod_tables = prod[tbl].drop_duplicates()
 sys_tables = sys_[tbl].drop_duplicates()
@@ -140,6 +151,14 @@ notes = [
     "Length 'NULL' = non-character type; -1 in source = (max).",
     "Tables missing from SysTest are listed on ProdTablesMissing, not repeated as dropped columns.",
 ]
+if wanted:
+    in_prod = set(prod_tables.table_name)
+    changed = set(summary.table_name) | set(dropped_tables.table_name)
+    notes.insert(0, f"Subset: limited to {len(wanted)} requested tables ({Path(args.tables).name}).")
+    notes.append("Requested tables with no schema change: "
+                 + (", ".join(t for t in wanted if t in in_prod and t not in changed) or "none"))
+    notes.append("Requested tables not found in Prod: "
+                 + (", ".join(t for t in wanted if t not in in_prod) or "none"))
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -184,7 +203,8 @@ for sh in wb.worksheets:
 ws.column_dimensions["A"].width = 42
 ws.column_dimensions["B"].width = 12
 
-xlsx = out / "MAS_Prod_vs_SysTest_Compare.xlsx"
+suffix = f"_{Path(args.tables).stem}" if wanted else ""
+xlsx = out / f"MAS_Prod_vs_SysTest_Compare{suffix}.xlsx"
 wb.calculation.fullCalcOnLoad = True  # Excel computes the Stats formulas on open
 wb.save(xlsx)
 print(f"Wrote {xlsx}")
