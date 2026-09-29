@@ -6,6 +6,9 @@ Scope: only tables that exist in Prod.
   - Prod tables missing from SysTest
 New SysTest-only tables are ignored.
 
+Output: one workbook, MAS_Prod_vs_SysTest_Compare.xlsx (Stats, TableSummary,
+ColumnChanges, TypeTransitions, ProdTablesMissing tabs).
+
 Usage: python compare_schema.py <MAS_Upgrade.xlsx> [out_dir]
 """
 import sys
@@ -109,33 +112,79 @@ transitions = (mod.groupby(["prod_data_type", "systest_data_type", "change_type"
                .rename("column_count").reset_index().sort_values("column_count", ascending=False))
 
 # --- overall stats
-stats = pd.DataFrame([
-    ("Prod tables", len(prod_tables)),
-    ("SysTest tables", len(sys_tables)),
-    ("Prod tables present in SysTest", len(common)),
-    ("Prod tables MISSING in SysTest", len(dropped_tables)),
-    ("New SysTest-only tables (ignored)", len(sys_tables) - len(common)),
-    ("Common tables with any column change", len(summary)),
-    ("Common tables with columns added", int((summary.cols_added > 0).sum())),
-    ("Common tables with columns dropped", int((summary.cols_dropped > 0).sum())),
-    ("Columns added (to existing Prod tables)", int((detail.primary_change == "COLUMN_ADDED").sum())),
-    ("Columns dropped (from existing Prod tables)", int((detail.primary_change == "COLUMN_DROPPED").sum())),
-    ("Columns with data type change", int(detail.change_type.str.contains("DATA_TYPE_CHANGED").sum())),
-    ("Columns with length change", int(detail.change_type.str.contains("LENGTH_").sum())),
-    ("  of which length decreased", int(detail.change_type.str.contains("LENGTH_DECREASED").sum())),
-    ("Columns with precision/scale change", int(detail.change_type.str.contains("PRECISION_|SCALE_").sum())),
-    ("Columns with nullability change", int(detail.change_type.str.contains("NOW_NULLABLE|NOW_NOT_NULL").sum())),
-], columns=["metric", "value"])
+# --- overall stats: counts derivable from the other tabs are live COUNTIF formulas
+CC, TS = "ColumnChanges", "TableSummary"
+stats = [
+    ("Prod tables", len(prod_tables), "Value from Prod sheet of source workbook"),
+    ("SysTest tables", len(sys_tables), "Value from SysTest sheet of source workbook"),
+    ("Prod tables present in SysTest", len(common), "Value from source workbook"),
+    ("Prod tables MISSING in SysTest", "=COUNTA(ProdTablesMissing!B:B)-1", "Rows on ProdTablesMissing tab"),
+    ("New SysTest-only tables (out of scope)", len(sys_tables) - len(common), "Value from source workbook"),
+    ("Existing tables with any column change", f"=COUNTA({TS}!B:B)-1", "Rows on TableSummary tab"),
+    ("Existing tables with columns added", f"=COUNTIF({TS}!E:E,\">0\")", "TableSummary cols_added > 0"),
+    ("Existing tables with columns dropped", f"=COUNTIF({TS}!F:F,\">0\")", "TableSummary cols_dropped > 0"),
+    ("Columns added", f"=COUNTIF({CC}!D:D,\"COLUMN_ADDED\")", "ColumnChanges primary_change"),
+    ("Columns dropped", f"=COUNTIF({CC}!D:D,\"COLUMN_DROPPED\")", "ColumnChanges primary_change"),
+    ("Columns with data type change", f"=COUNTIF({CC}!E:E,\"*DATA_TYPE_CHANGED*\")", "ColumnChanges change_type"),
+    ("Columns with length change", f"=COUNTIF({CC}!E:E,\"*LENGTH_*\")", "ColumnChanges change_type"),
+    ("  of which length decreased", f"=COUNTIF({CC}!E:E,\"*LENGTH_DECREASED*\")", "ColumnChanges change_type"),
+    ("Columns with precision/scale change",
+     f"=SUMPRODUCT(--((ISNUMBER(SEARCH(\"PRECISION_\",{CC}!E2:E{len(detail)+1})))+(ISNUMBER(SEARCH(\"SCALE_\",{CC}!E2:E{len(detail)+1})))>0))",
+     "ColumnChanges change_type"),
+    ("Columns with nullability change", f"=COUNTIF({CC}!E:E,\"*NOW_N*\")", "ColumnChanges change_type"),
+]
+notes = [
+    "Scope: only tables that exist in Prod. New SysTest-only tables are excluded.",
+    "Table/column names matched case-insensitively (SQL Server collation).",
+    "primary_change = first item of change_type; change_type lists every change on the column, pipe-separated.",
+    "Length 'NULL' = non-character type; -1 in source = (max).",
+    "Tables missing from SysTest are listed on ProdTablesMissing, not repeated as dropped columns.",
+]
 
-stats.to_csv(out / "00_summary_stats.csv", index=False)
-summary.to_csv(out / "01_table_summary.csv", index=False)
-detail.to_csv(out / "02_column_changes_detail.csv", index=False)
-transitions.to_csv(out / "03_datatype_transitions.csv", index=False)
-dropped_tables.to_csv(out / "04_prod_tables_missing_in_systest.csv", index=False)
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
-with pd.ExcelWriter(out / "MAS_Prod_vs_SysTest_Compare.xlsx") as xw:
-    for n, df in [("Stats", stats), ("TableSummary", summary), ("ColumnChanges", detail),
-                  ("TypeTransitions", transitions), ("ProdTablesMissing", dropped_tables)]:
-        df.to_excel(xw, sheet_name=n, index=False)
+FONT, BOLD = Font(name="Arial", size=10), Font(name="Arial", size=10, bold=True, color="FFFFFF")
+HDR = PatternFill("solid", fgColor="1F4E78")
 
-print(stats.to_string(index=False))
+wb = Workbook()
+ws = wb.active
+ws.title = "Stats"
+ws.append(["Metric", "Value", "Source"])
+for r in stats:
+    ws.append(list(r))
+ws.append([])
+ws.append(["Notes"])
+for n in notes:
+    ws.append([n])
+ws.cell(ws.max_row - len(notes), 1).font = Font(name="Arial", size=10, bold=True)
+
+for name, df in [(TS, summary), (CC, detail), ("TypeTransitions", transitions),
+                 ("ProdTablesMissing", dropped_tables)]:
+    sh = wb.create_sheet(name)
+    sh.append(list(df.columns))
+    for row in df.astype(object).where(df.notna(), None).itertuples(index=False):
+        sh.append(list(row))
+
+for sh in wb.worksheets:
+    last_col = get_column_letter(sh.max_column)
+    for row in sh.iter_rows():
+        for c in row:
+            c.font = FONT
+    for c in sh[1]:
+        c.font, c.fill = BOLD, HDR
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    sh.freeze_panes = "A2"
+    if sh.title != "Stats":
+        sh.auto_filter.ref = f"A1:{last_col}{sh.max_row}"
+    for i, col in enumerate(sh.iter_cols(min_row=1, max_row=min(sh.max_row, 500)), 1):
+        w = max((len(str(c.value)) for c in col if c.value is not None and not str(c.value).startswith("=")), default=8)
+        sh.column_dimensions[get_column_letter(i)].width = min(max(w + 2, 10), 60)
+ws.column_dimensions["A"].width = 42
+ws.column_dimensions["B"].width = 12
+
+xlsx = out / "MAS_Prod_vs_SysTest_Compare.xlsx"
+wb.calculation.fullCalcOnLoad = True  # Excel computes the Stats formulas on open
+wb.save(xlsx)
+print(f"Wrote {xlsx}")
